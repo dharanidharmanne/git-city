@@ -9,6 +9,7 @@ import LeaderboardUserPosition from "@/components/LeaderboardUserPosition";
 import LeaderboardYouVsNext from "@/components/LeaderboardYouVsNext";
 import FlyLeaderboard from "@/components/FlyLeaderboard";
 import DailiesLeaderboard from "@/components/DailiesLeaderboard";
+import { rankFromLevel, tierFromLevel } from "@/lib/xp";
 
 export const revalidate = 300; // ISR: regenerate every 5 min
 
@@ -31,9 +32,11 @@ interface Developer {
   referral_count: number;
   kudos_count: number;
   created_at?: string;
+  xp_total?: number;
+  xp_level?: number;
 }
 
-type TabId = "contributors" | "stars" | "architects" | "achievers" | "recruiters";
+type TabId = "contributors" | "stars" | "architects" | "achievers" | "recruiters" | "xp";
 
 const TABS: { id: TabId; label: string; metric: string }[] = [
   { id: "contributors", label: "Contributors", metric: "contributions" },
@@ -41,6 +44,7 @@ const TABS: { id: TabId; label: string; metric: string }[] = [
   { id: "architects", label: "Architects", metric: "public_repos" },
   { id: "achievers", label: "Achievers", metric: "achievements" },
   { id: "recruiters", label: "Recruiters", metric: "referral_count" },
+  { id: "xp", label: "XP", metric: "xp_total" },
 ];
 
 const ACCENT = "#c8e64a";
@@ -69,6 +73,7 @@ export default async function LeaderboardPage({
     : activeTab === "stars" ? "total_stars"
     : activeTab === "architects" ? "public_repos"
     : activeTab === "recruiters" ? "referral_count"
+    : activeTab === "xp" ? "xp_total"
     : "contributions"; // achievers handled separately
   const orderAscending = activeTab === "contributors"; // rank is ascending (1 = best)
 
@@ -90,7 +95,7 @@ export default async function LeaderboardPage({
     const { data: achieverDevs } = achieverIds.length > 0
       ? await supabase
         .from("developers")
-        .select("id, github_login, name, avatar_url, contributions, contributions_total, total_stars, public_repos, primary_language, rank, referral_count, kudos_count, created_at")
+        .select("id, github_login, name, avatar_url, contributions, contributions_total, total_stars, public_repos, primary_language, rank, referral_count, kudos_count, created_at, xp_total, xp_level")
         .in("id", achieverIds)
       : { data: [] };
 
@@ -106,7 +111,7 @@ export default async function LeaderboardPage({
   } else {
     const { data } = await supabase
       .from("developers")
-      .select("github_login, name, avatar_url, contributions, contributions_total, total_stars, public_repos, primary_language, rank, referral_count, kudos_count, created_at")
+      .select("github_login, name, avatar_url, contributions, contributions_total, total_stars, public_repos, primary_language, rank, referral_count, kudos_count, created_at, xp_total, xp_level")
       .order(orderColumn, { ascending: orderAscending, nullsFirst: false })
       .order("created_at", { ascending: true })
       .limit(50);
@@ -127,14 +132,23 @@ export default async function LeaderboardPage({
       case "architects": return dev.public_repos.toLocaleString();
       case "achievers": return String(achieverCounts[dev.github_login] ?? 0);
       case "recruiters": return (dev.referral_count ?? 0).toLocaleString();
+      case "xp": return (dev.xp_total ?? 0).toLocaleString();
       default: return "";
     }
+  }
+
+  function getXpBadge(dev: Developer): { title: string; color: string } | null {
+    if (activeTab !== "xp" || !dev.xp_level) return null;
+    const rank = rankFromLevel(dev.xp_level);
+    const tier = tierFromLevel(dev.xp_level);
+    return { title: `Lv${dev.xp_level} ${rank.title}`, color: tier.color };
   }
 
   const metricLabel = activeTab === "contributors" ? "Contributions"
     : activeTab === "stars" ? "Stars"
     : activeTab === "architects" ? "Repos"
     : activeTab === "achievers" ? "Achievements"
+    : activeTab === "xp" ? "XP"
     : "Referrals";
 
   // A4: Raw metric values for "You vs. Next" component
@@ -145,6 +159,7 @@ export default async function LeaderboardPage({
       case "architects": return dev.public_repos;
       case "achievers": return achieverCounts[dev.github_login] ?? 0;
       case "recruiters": return dev.referral_count ?? 0;
+      case "xp": return dev.xp_total ?? 0;
       default: return 0;
     }
   }
@@ -261,7 +276,7 @@ export default async function LeaderboardPage({
               <div className="flex items-center gap-4 border-b-[3px] border-border bg-bg-card px-5 py-3 text-xs text-muted">
                 <span className="w-10 text-center">#</span>
                 <span className="flex-1">Developer</span>
-                <span className="hidden w-24 text-right sm:block">Language</span>
+                <span className="hidden w-24 text-right sm:block">{activeTab === "xp" ? "Rank" : "Language"}</span>
                 <span className="w-28 text-right">{metricLabel}</span>
               </div>
 
@@ -313,10 +328,17 @@ export default async function LeaderboardPage({
                     </div>
 
                     <span className="hidden w-24 text-right text-xs text-muted sm:block">
-                      {dev.primary_language ?? "\u2014"}
+                      {activeTab === "xp"
+                        ? (() => {
+                            const badge = getXpBadge(dev);
+                            return badge ? (
+                              <span style={{ color: badge.color }}>{badge.title}</span>
+                            ) : "\u2014";
+                          })()
+                        : (dev.primary_language ?? "\u2014")}
                     </span>
 
-                    <span className="w-28 text-right text-sm" style={{ color: ACCENT }}>
+                    <span className="w-28 text-right text-sm" style={{ color: activeTab === "xp" ? tierFromLevel(dev.xp_level ?? 1).color : ACCENT }}>
                       {getMetricValue(dev)}
                     </span>
                   </Link>

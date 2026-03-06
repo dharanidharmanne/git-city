@@ -23,6 +23,7 @@ import ActivityPanel from "@/components/ActivityPanel";
 import { ITEM_NAMES, ITEM_EMOJIS } from "@/lib/zones";
 import { useStreakCheckin } from "@/lib/useStreakCheckin";
 import { useLiveUsers } from "@/lib/useLiveUsers";
+import { useCodingPresence } from "@/lib/useCodingPresence";
 import { useRaidSequence } from "@/lib/useRaidSequence";
 import { useDailies } from "@/lib/useDailies";
 import DailiesWidget from "@/components/DailiesWidget";
@@ -32,6 +33,9 @@ import PillModal from "@/components/PillModal";
 import FounderMessage from "@/components/FounderMessage";
 import RabbitCompletion from "@/components/RabbitCompletion";
 import DistrictChooser from "@/components/DistrictChooser";
+import XpBar from "@/components/XpBar";
+import LevelUpToast from "@/components/LevelUpToast";
+import { rankFromLevel, tierFromLevel, levelProgress, xpForLevel } from "@/lib/xp";
 import LoadingScreen, { type LoadingStage } from "@/components/LoadingScreen";
 import MiniMap from "@/components/MiniMap";
 import { getCityCache, setCityCache, clearCityCache } from "@/lib/cityCache";
@@ -366,6 +370,9 @@ function HomeContent() {
   const [username, setUsername] = useState("");
   const failedUsernamesRef = useRef<Map<string, string>>(new Map()); // username -> error code
   const [buildings, setBuildings] = useState<CityBuilding[]>([]);
+  // Keep raw dev records so we can inject new devs and regenerate layout locally
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rawDevsRef = useRef<any[]>([]);
   const [plazas, setPlazas] = useState<CityPlaza[]>([]);
   const [decorations, setDecorations] = useState<CityDecoration[]>([]);
   const [river, setRiver] = useState<CityRiver | null>(null);
@@ -424,6 +431,10 @@ function HomeContent() {
     avatar_url: string | null;
   } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [vsCodeKey, setVsCodeKey] = useState<string | null>(null);
+  const [vsCodeKeyLoading, setVsCodeKeyLoading] = useState(false);
+  const [vsCodeKeyCopied, setVsCodeKeyCopied] = useState(false);
+  const [codingPanelOpen, setCodingPanelOpen] = useState(false);
   const [session, setSession] = useState<Session | null>(null);
   const [claiming, setClaiming] = useState(false);
   const [purchasedItem, setPurchasedItem] = useState<string | null>(null);
@@ -472,6 +483,9 @@ function HomeContent() {
   // Welcome CTA (shown after intro for non-logged-in users)
   const [welcomeCtaVisible, setWelcomeCtaVisible] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // XP level-up toast
+  const [levelUpLevel, setLevelUpLevel] = useState<number | null>(null);
 
   // Fly onboarding
   const [showDailyNudge, setShowDailyNudge] = useState(false);
@@ -984,55 +998,82 @@ function HomeContent() {
 
   const reloadCity = useCallback(async (bustCache = false) => {
     if (bustCache) clearCityCache();
-    const cacheBust = bustCache ? `&_t=${Date.now()}` : "";
-    const CHUNK = 1000;
-    const res = await fetch(`/api/city?from=0&to=${CHUNK}${cacheBust}`);
-    if (!res.ok) return null;
-    const data = await res.json();
-    setStats(data.stats);
-    if (data.developers.length === 0) return null;
+    const cacheBust = bustCache ? `?_t=${Date.now()}` : "";
 
-    // Render downtown immediately
-    const layout = generateCityLayout(data.developers);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let allDevs: any[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let cityStats: any = null;
+
+    // Try pre-computed snapshot first
+    try {
+      const v = Math.floor(Date.now() / 300_000);
+      const snapshotUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/city-data/snapshot.json?v=${v}${cacheBust ? `&_t=${Date.now()}` : ""}`;
+      const snapshotRes = await fetch(snapshotUrl);
+      if (snapshotRes.ok) {
+        const snapshot = await snapshotRes.json();
+        allDevs = snapshot.developers;
+        cityStats = snapshot.stats;
+      }
+    } catch { /* fall through to chunked */ }
+
+    // Fallback to chunked API
+    if (allDevs.length === 0) {
+      const cbParam = bustCache ? `&_t=${Date.now()}` : "";
+      const CHUNK = 1000;
+      const res = await fetch(`/api/city?from=0&to=${CHUNK}${cbParam}`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      allDevs = data.developers ?? [];
+      cityStats = data.stats;
+
+      const total = cityStats?.total_developers ?? 0;
+      if (total > CHUNK && allDevs.length > 0) {
+        const promises: Promise<{ developers: typeof data.developers } | null>[] = [];
+        for (let from = CHUNK; from < total; from += CHUNK) {
+          promises.push(
+            fetch(`/api/city?from=${from}&to=${from + CHUNK}${cbParam}`)
+              .then(r => r.ok ? r.json() : null)
+          );
+        }
+        const results = await Promise.all(promises);
+        for (const chunk of results) {
+          if (chunk?.developers?.length) {
+            allDevs = [...allDevs, ...chunk.developers];
+          }
+        }
+      }
+    }
+
+    if (allDevs.length === 0) return null;
+
+    // Apply loadout override from localStorage (saved in shop, TTL 10 min)
+    try {
+      const raw = localStorage.getItem("gitcity:loadout_override");
+      if (raw) {
+        const { developerId, loadout, ts } = JSON.parse(raw);
+        if (Date.now() - ts < 10 * 60 * 1000) {
+          const idx = allDevs.findIndex((d: Record<string, unknown>) => d.id === developerId);
+          if (idx !== -1) {
+            allDevs[idx] = { ...allDevs[idx], loadout };
+          }
+        } else {
+          localStorage.removeItem("gitcity:loadout_override");
+        }
+      }
+    } catch {}
+
+    rawDevsRef.current = allDevs;
+    setStats(cityStats);
+    const layout = generateCityLayout(allDevs);
     setBuildings(layout.buildings);
     setPlazas(layout.plazas);
     setDecorations(layout.decorations);
     setRiver(layout.river);
     setBridges(layout.bridges);
     setDistrictZones(layout.districtZones);
-
-    const total = data.stats?.total_developers ?? 0;
-    if (total <= CHUNK) {
-      setCityCache({ ...layout, stats: data.stats });
-      return layout.buildings;
-    }
-
-    // Fetch remaining chunks in parallel
-    const promises: Promise<{ developers: typeof data.developers } | null>[] = [];
-    for (let from = CHUNK; from < total; from += CHUNK) {
-      promises.push(
-        fetch(`/api/city?from=${from}&to=${from + CHUNK}${cacheBust}`)
-          .then(r => r.ok ? r.json() : null)
-      );
-    }
-    const results = await Promise.all(promises);
-    let allDevs = [...data.developers];
-    for (const chunk of results) {
-      if (chunk?.developers?.length) {
-        allDevs = [...allDevs, ...chunk.developers];
-      }
-    }
-
-    // Regenerate full layout with all developers
-    const fullLayout = generateCityLayout(allDevs);
-    setBuildings(fullLayout.buildings);
-    setPlazas(fullLayout.plazas);
-    setDecorations(fullLayout.decorations);
-    setRiver(fullLayout.river);
-    setBridges(fullLayout.bridges);
-    setDistrictZones(fullLayout.districtZones);
-    setCityCache({ ...fullLayout, stats: data.stats });
-    return fullLayout.buildings;
+    setCityCache({ ...layout, stats: cityStats });
+    return layout.buildings;
   }, []);
 
   // Handle loading fade complete: transition to "done" and trigger intro
@@ -1086,31 +1127,86 @@ function HomeContent() {
           return;
         }
 
-        // Fetch first chunk
+        // Fetch city data
         setLoadStage("fetching");
         setLoadProgress(10);
 
-        const CHUNK = 1000;
-        const res = await fetch(`/api/city?from=0&to=${CHUNK}`);
-        if (!res.ok) throw new Error("Failed to fetch city data");
-        const data = await res.json();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let allDevs: any[] = [];
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let cityStats: any = null;
+
+        // Try pre-computed snapshot first (single file from Supabase CDN)
+        try {
+          const v = Math.floor(Date.now() / 300_000); // changes every 5 min, aligned with cron
+          const snapshotUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/city-data/snapshot.json?v=${v}`;
+          const snapshotRes = await fetch(snapshotUrl);
+          if (snapshotRes.ok) {
+            const snapshot = await snapshotRes.json();
+            allDevs = snapshot.developers;
+            cityStats = snapshot.stats;
+          }
+        } catch { /* fall through to chunked */ }
+
+        // Fallback to chunked API
+        if (allDevs.length === 0) {
+          const CHUNK = 1000;
+          const res = await fetch(`/api/city?from=0&to=${CHUNK}`);
+          if (!res.ok) throw new Error("Failed to fetch city data");
+          const data = await res.json();
+          allDevs = data.developers ?? [];
+          cityStats = data.stats;
+
+          const total = cityStats?.total_developers ?? 0;
+          if (total > CHUNK && allDevs.length > 0) {
+            const promises: Promise<{ developers: typeof data.developers } | null>[] = [];
+            for (let from = CHUNK; from < total; from += CHUNK) {
+              promises.push(
+                fetch(`/api/city?from=${from}&to=${from + CHUNK}`)
+                  .then((r) => (r.ok ? r.json() : null))
+              );
+            }
+            const results = await Promise.all(promises);
+            for (const chunk of results) {
+              if (chunk?.developers?.length) {
+                allDevs = [...allDevs, ...chunk.developers];
+              }
+            }
+          }
+        }
 
         setLoadProgress(30);
 
-        if (data.developers.length === 0) {
-          // Empty city, skip to ready
+        if (!allDevs || allDevs.length === 0) {
           setLoadProgress(100);
           setLoadStage("ready");
           return;
         }
+
+        // Apply loadout override from localStorage (saved in shop, TTL 10 min)
+        try {
+          const raw = localStorage.getItem("gitcity:loadout_override");
+          if (raw) {
+            const { developerId, loadout, ts } = JSON.parse(raw);
+            if (Date.now() - ts < 10 * 60 * 1000) {
+              const idx = allDevs.findIndex((d: Record<string, unknown>) => d.id === developerId);
+              if (idx !== -1) {
+                allDevs[idx] = { ...allDevs[idx], loadout };
+              }
+            } else {
+              localStorage.removeItem("gitcity:loadout_override");
+            }
+          }
+        } catch {}
 
         // Generate layout
         setLoadStage("generating");
         setLoadProgress(45);
         await new Promise((r) => setTimeout(r, 0)); // yield to browser
 
-        setStats(data.stats);
-        let finalLayout = generateCityLayout(data.developers);
+        rawDevsRef.current = allDevs;
+        setStats(cityStats);
+        const finalLayout = generateCityLayout(allDevs);
         setBuildings(finalLayout.buildings);
         setPlazas(finalLayout.plazas);
         setDecorations(finalLayout.decorations);
@@ -1131,44 +1227,16 @@ function HomeContent() {
             resolved = true;
             resolve();
           };
-          // 2 chained rAFs
           requestAnimationFrame(() => {
             requestAnimationFrame(() => done());
           });
-          // Fallback for hidden tabs where rAF doesn't fire
           setTimeout(done, 500);
         });
 
         setLoadProgress(80);
 
-        // Fetch remaining chunks if needed
-        const total = data.stats?.total_developers ?? 0;
-        if (total > CHUNK) {
-          const promises: Promise<{ developers: typeof data.developers } | null>[] = [];
-          for (let from = CHUNK; from < total; from += CHUNK) {
-            promises.push(
-              fetch(`/api/city?from=${from}&to=${from + CHUNK}`)
-                .then((r) => (r.ok ? r.json() : null))
-            );
-          }
-          const results = await Promise.all(promises);
-          let allDevs = [...data.developers];
-          for (const chunk of results) {
-            if (chunk?.developers?.length) {
-              allDevs = [...allDevs, ...chunk.developers];
-            }
-          }
-          finalLayout = generateCityLayout(allDevs);
-          setBuildings(finalLayout.buildings);
-          setPlazas(finalLayout.plazas);
-          setDecorations(finalLayout.decorations);
-          setRiver(finalLayout.river);
-          setBridges(finalLayout.bridges);
-          setDistrictZones(finalLayout.districtZones);
-        }
-
         // Save to cache for return visits
-        setCityCache({ ...finalLayout, stats: data.stats });
+        setCityCache({ ...finalLayout, stats: cityStats });
         setLoadProgress(95);
 
         // Enforce minimum 800ms display time to avoid flash
@@ -1391,10 +1459,36 @@ function HomeContent() {
 
       setFeedback(null);
 
-      // Only reload city if the dev is new — skip the full reload when they already exist
+      // If dev is new, inject into local raw array and regenerate layout instantly
+      // (no need to wait for the snapshot cron to include them)
       let updatedBuildings: CityBuilding[] | null = null;
       if (!existedBefore) {
-        updatedBuildings = await reloadCity(true);
+        const newDev = {
+          ...devData,
+          owned_items: [],
+          achievements: [],
+          loadout: null,
+          custom_color: null,
+          billboard_images: [],
+          active_raid_tag: null,
+          kudos_count: devData.kudos_count ?? 0,
+          visit_count: devData.visit_count ?? 0,
+          app_streak: devData.app_streak ?? 0,
+          raid_xp: devData.raid_xp ?? 0,
+          rabbit_completed: false,
+          xp_total: devData.xp_total ?? 0,
+          xp_level: devData.xp_level ?? 1,
+        };
+        rawDevsRef.current = [...rawDevsRef.current, newDev];
+        const layout = generateCityLayout(rawDevsRef.current);
+        setBuildings(layout.buildings);
+        setPlazas(layout.plazas);
+        setDecorations(layout.decorations);
+        setRiver(layout.river);
+        setBridges(layout.bridges);
+        setDistrictZones(layout.districtZones);
+        setCityCache({ ...layout, stats: stats ?? { total_developers: 0, total_contributions: 0 } });
+        updatedBuildings = layout.buildings;
       }
 
       // Focus camera on the searched building
@@ -1451,7 +1545,7 @@ function HomeContent() {
     } finally {
       setLoading(false);
     }
-  }, [username, buildings, reloadCity]);
+  }, [username, buildings]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -1530,8 +1624,29 @@ if (claimingGift) return;
   const trackMissionRef = useRef(trackClientMission);
   trackMissionRef.current = trackClientMission;
 
+  // Detect level-up from check-in XP result
+  useEffect(() => {
+    if (!streakData?.xp || !myBuilding) return;
+    const newLevel = streakData.xp.new_level;
+    const currentLevel = myBuilding.xp_level ?? 1;
+    if (newLevel > currentLevel) {
+      setLevelUpLevel(newLevel);
+    }
+  }, [streakData?.xp, myBuilding]);
+
   // Live users presence
   const { count: liveUsers, status: liveStatus } = useLiveUsers();
+  const { liveCount: codingCount, liveByLogin } = useCodingPresence();
+
+  // City energy: devs coding -> city lights up. 0 devs = nearly dark, 5+ = full brightness
+  const cityEnergy = useMemo(() => {
+    if (codingCount === 0) return 0.05;
+    if (codingCount === 1) return 0.35;
+    if (codingCount === 2) return 0.55;
+    if (codingCount <= 5) return 0.55 + (codingCount - 2) * 0.15; // 3->0.7, 5->1.0
+    if (codingCount <= 15) return 1.0 + (Math.min(codingCount, 15) - 5) * 0.02; // 10->1.1, 15->1.2
+    return Math.min(1.4, 1.2 + (codingCount - 15) * 0.02); // 25+->1.4 cap
+  }, [codingCount]);
 
   // ─── Milestone celebration system ──────────────────────────
   const forceCelebrate = searchParams.has("celebrate");
@@ -1808,6 +1923,8 @@ if (claimingGift) return;
         onIntroEnd={endIntro}
         onFocusInfo={() => {}}
         ghostPreviewLogin={ghostPreviewLogin}
+        liveByLogin={liveByLogin}
+        cityEnergy={cityEnergy}
         raidPhase={raidState.phase}
         raidData={raidState.raidData}
         raidAttacker={raidState.attackerBuilding}
@@ -2170,8 +2287,8 @@ if (claimingGift) return;
             </button>
           </div>
 
-          {/* Theme switcher (bottom-left) — same position as main controls */}
-          <div className="pointer-events-auto fixed bottom-10 left-3 z-[25] flex items-center gap-2 sm:left-4">
+          {/* Theme switcher + Radio (bottom-left) — above ticker */}
+          <div className="pointer-events-auto fixed bottom-10 left-3 z-[31] flex items-center gap-2 sm:left-4">
             <button
               onClick={cycleTheme}
               className="btn-press flex items-center gap-1.5 border-[3px] border-border bg-bg/70 px-2.5 py-1 text-[10px] backdrop-blur-sm transition-colors hover:border-border-light"
@@ -2180,6 +2297,7 @@ if (claimingGift) return;
               <span className="text-cream">{theme.name}</span>
               <span className="text-dim">{themeIndex + 1}/{THEMES.length}</span>
             </button>
+            <div id="gc-radio-slot" />
           </div>
 
           {/* Feed toggle (top-right, below GitHub badges on desktop) */}
@@ -2214,7 +2332,7 @@ if (claimingGift) return;
 
       {/* ─── GitHub Badge (mobile: top-center, desktop: top-right) ─── */}
       {!flyMode && !introMode && !rabbitCinematic && (
-        <div className={`pointer-events-auto fixed top-3 left-1/2 z-30 -translate-x-1/2 items-center gap-2 sm:left-auto sm:right-4 sm:top-4 sm:translate-x-0 ${exploreMode ? "hidden lg:flex" : "flex"}`}>
+        <div className={`pointer-events-auto fixed top-3 left-3 z-30 items-center gap-1.5 sm:gap-2 sm:left-auto sm:right-4 sm:top-4 ${exploreMode ? "hidden lg:flex" : "flex"}`}>
           <a
             href="https://github.com/srizzon/git-city"
             target="_blank"
@@ -2232,30 +2350,221 @@ if (claimingGift) return;
             className="flex items-center gap-1.5 border-[3px] border-border bg-bg/70 px-2.5 py-1 text-[10px] backdrop-blur-sm transition-colors hover:border-border-light"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" className="text-[#5865F2]"><path d="M20.317 4.37a19.791 19.791 0 00-4.885-1.515.074.074 0 00-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 00-5.487 0 12.64 12.64 0 00-.617-1.25.077.077 0 00-.079-.037A19.736 19.736 0 003.677 4.37a.07.07 0 00-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 00.031.057 19.9 19.9 0 005.993 3.03.078.078 0 00.084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 00-.041-.106 13.107 13.107 0 01-1.872-.892.077.077 0 01-.008-.128 10.2 10.2 0 00.372-.292.074.074 0 01.077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 01.078.01c.12.098.246.198.373.292a.077.077 0 01-.006.127 12.299 12.299 0 01-1.873.892.077.077 0 00-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 00.084.028 19.839 19.839 0 006.002-3.03.077.077 0 00.032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 00-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.947 2.418-2.157 2.418z"/></svg>
-            <span className="text-cream">Discord</span>
+            <span className="hidden sm:inline text-cream">Discord</span>
             {discordMembers != null && <span className="text-cream">{discordMembers.toLocaleString()}</span>}
           </a>
           {liveStatus !== "error" && (
             <div className="flex items-center gap-1.5 border-[3px] border-border bg-bg/70 px-2.5 py-1 text-[10px] backdrop-blur-sm">
               <span className="live-dot h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[#4ade80]" />
               <span className="text-cream">{liveUsers.toLocaleString()}</span>
-              <span className="text-muted">live</span>
+              <span className="hidden sm:inline text-muted">live</span>
             </div>
           )}
+          {(() => {
+            const energyLabel = codingCount === 0 ? "City sleeping" : codingCount <= 2 ? "City waking up" : codingCount <= 9 ? "City alive" : "City buzzing";
+            const energyDotColor = codingCount === 0 ? "bg-muted/50" : codingCount <= 2 ? "bg-[#fbbf24]" : "bg-[#4ade80]";
+            const energyDotAnim = codingCount === 0 ? "" : "live-dot";
+            return (
+            <div className="relative hidden sm:block">
+              <button
+                onClick={() => setCodingPanelOpen((v) => !v)}
+                className="flex items-center gap-1.5 border-[3px] border-border bg-bg/70 px-2.5 py-1 text-[10px] backdrop-blur-sm transition-colors hover:border-border-light"
+              >
+                <span className={`${energyDotAnim} h-1.5 w-1.5 flex-shrink-0 rounded-full ${energyDotColor}`} />
+                {codingCount > 0 ? (
+                  <>
+                    <span className="text-cream">{codingCount}</span>
+                    <span className="text-muted">coding now</span>
+                  </>
+                ) : (
+                  <span className="text-muted">{energyLabel}</span>
+                )}
+              </button>
+              {codingPanelOpen && (() => {
+                // Creator always first, then up to 4 others
+                const allDevs = Array.from(liveByLogin.values());
+                const creator = allDevs.find((d) => d.githubLogin.toLowerCase() === "srizzon");
+                const others = allDevs.filter((d) => d.githubLogin.toLowerCase() !== "srizzon");
+                const displayDevs = [
+                  ...(creator ? [creator] : []),
+                  ...others.slice(0, creator ? 4 : 5),
+                ];
+                const remaining = allDevs.length - displayDevs.length;
+
+                return (
+                  <div className="absolute right-0 top-full mt-1 w-80 border-[3px] border-border bg-bg/95 backdrop-blur-sm">
+                    <div className="border-b border-border px-5 py-3 text-xs text-muted">
+                      Coding right now
+                    </div>
+                    <div className="max-h-60 overflow-y-auto">
+                      {displayDevs.map((dev) => {
+                        const isCreator = dev.githubLogin.toLowerCase() === "srizzon";
+                        return (
+                          <button
+                            key={dev.githubLogin}
+                            onClick={() => {
+                              const b = buildings.find(
+                                (b) => b.login.toLowerCase() === dev.githubLogin.toLowerCase(),
+                              );
+                              if (b) {
+                                setSelectedBuilding(null);
+                                setFocusedBuilding(b.login);
+                                setCodingPanelOpen(false);
+                              }
+                            }}
+                            className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-white/5"
+                          >
+                            <div className="relative flex-shrink-0">
+                              {dev.avatarUrl && (
+                                <img
+                                  src={dev.avatarUrl}
+                                  alt=""
+                                  className="h-6 w-6 rounded-full"
+                                  style={isCreator ? { boxShadow: "0 0 6px #fbbf24" } : undefined}
+                                />
+                              )}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5">
+                                <span className={`truncate text-[11px] ${isCreator ? "text-[#fbbf24]" : "text-cream"}`}>
+                                  {dev.githubLogin}
+                                </span>
+                                {isCreator && (
+                                  <span className="shrink-0 text-[8px] text-[#fbbf24]/70">CREATOR</span>
+                                )}
+                              </div>
+                              <div className="truncate text-[10px] normal-case text-muted">
+                                {isCreator ? "building the city" : dev.language || ""}
+                              </div>
+                            </div>
+                            <span className={`live-dot h-2 w-2 flex-shrink-0 rounded-full ${isCreator ? "bg-[#fbbf24]" : "bg-[#4ade80]"}`} />
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {remaining > 0 && (
+                      <div className="border-t border-border">
+                        <Link
+                          href="/live"
+                          onClick={() => setCodingPanelOpen(false)}
+                          className="block px-4 py-2.5 text-center text-[11px] text-muted transition-colors hover:text-cream"
+                        >
+                          +{remaining} more &rarr;
+                        </Link>
+                      </div>
+                    )}
+
+                    {/* CTA: Go Live flow */}
+                    <div className="border-t border-border">
+                      {!session ? (
+                        <div className="px-5 py-5 text-center">
+                          <p className="mb-3 text-xs normal-case text-muted">
+                            Keep your city alive while you code
+                          </p>
+                          <Link
+                            href="/auth"
+                            onClick={() => setCodingPanelOpen(false)}
+                            className="btn-press inline-block w-full py-2.5 text-center text-xs text-bg"
+                            style={{ backgroundColor: "#4ade80", boxShadow: "2px 2px 0 0 #16a34a" }}
+                          >
+                            Sign in with GitHub
+                          </Link>
+                        </div>
+                      ) : liveByLogin.has(authLogin) ? (
+                        <div className="px-5 py-3.5 text-center text-xs normal-case text-[#4ade80]">
+                          Your building is powering the city
+                        </div>
+                      ) : vsCodeKey ? (
+                        <div className="px-5 py-5">
+                          <p className="mb-3 text-sm font-bold text-cream">Your API Key</p>
+                          <div className="mb-3 flex items-center gap-2">
+                            <code className="flex-1 truncate bg-white/5 px-3 py-2 text-[11px] normal-case text-cream">
+                              {vsCodeKey}
+                            </code>
+                            <button
+                              onClick={() => {
+                                navigator.clipboard.writeText(vsCodeKey);
+                                setVsCodeKeyCopied(true);
+                                setTimeout(() => setVsCodeKeyCopied(false), 2000);
+                              }}
+                              className="btn-press shrink-0 border border-border px-3 py-2 text-[11px] text-cream transition-colors hover:border-border-light"
+                            >
+                              {vsCodeKeyCopied ? "Copied!" : "Copy"}
+                            </button>
+                          </div>
+                          <div className="space-y-2.5 text-xs normal-case text-muted">
+                            <p><span className="text-cream">1.</span> Install <a href="https://marketplace.visualstudio.com/items?itemName=git-city.gitcity" target="_blank" rel="noopener noreferrer" className="text-[#4ade80] hover:underline">Git City: Pulse</a> in VS Code</p>
+                            <p><span className="text-cream">2.</span> Cmd+Shift+P &rarr; &ldquo;Pulse: Connect&rdquo;</p>
+                            <p><span className="text-cream">3.</span> Paste your key and start coding</p>
+                          </div>
+                          <p className="mt-3 text-[10px] normal-case text-muted/50">
+                            Your building lights up in ~30s
+                          </p>
+                          <p className="mt-1.5 text-[10px] normal-case text-muted/50">
+                            Only your username and language are shared publicly. Control what&apos;s sent in VS Code Settings &gt; Git City &gt; Privacy.
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="px-5 py-5">
+                          <p className="mb-3 text-sm normal-case text-cream font-bold">
+                            Keep your city alive
+                          </p>
+                          <p className="mb-3 text-[11px] normal-case text-muted">
+                            When you code, your building glows and the city stays lit. Every active dev powers the signal.
+                          </p>
+                          <div className="mb-4 space-y-2.5 text-xs normal-case text-muted">
+                            <p><span className="text-cream">1.</span> Generate your key below</p>
+                            <p><span className="text-cream">2.</span> Install <a href="https://marketplace.visualstudio.com/items?itemName=git-city.gitcity" target="_blank" rel="noopener noreferrer" className="text-[#4ade80] hover:underline">Git City: Pulse</a> in VS Code</p>
+                            <p><span className="text-cream">3.</span> Paste key in VS Code, start coding</p>
+                          </div>
+                          <button
+                            onClick={async () => {
+                              setVsCodeKeyLoading(true);
+                              try {
+                                const res = await fetch("/api/vscode-key", { method: "POST" });
+                                const data = await res.json();
+                                if (data.key) {
+                                  setVsCodeKey(data.key);
+                                  navigator.clipboard.writeText(data.key);
+                                  setVsCodeKeyCopied(true);
+                                  setTimeout(() => setVsCodeKeyCopied(false), 2000);
+                                }
+                              } finally {
+                                setVsCodeKeyLoading(false);
+                              }
+                            }}
+                            disabled={vsCodeKeyLoading}
+                            className="btn-press w-full py-2.5 text-center text-xs text-bg"
+                            style={{ backgroundColor: "#4ade80", boxShadow: "2px 2px 0 0 #16a34a" }}
+                          >
+                            {vsCodeKeyLoading ? "Generating..." : vsCodeKeyCopied ? "Key copied to clipboard!" : "Generate API Key"}
+                          </button>
+                          <p className="mt-3 text-[10px] normal-case text-muted/50">
+                            Only your username and language are shared publicly. You can control this in VS Code Settings &gt; Git City &gt; Privacy.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          );
+          })()}
         </div>
       )}
 
       {/* ─── Main UI Overlay ─── */}
       {!flyMode && !exploreMode && !introMode && !rabbitCinematic && (
         <div
-          className="pointer-events-none fixed inset-0 z-20 flex flex-col items-center justify-between pt-12 pb-4 px-3 sm:py-8 sm:px-4"
+          className="pointer-events-none fixed inset-0 z-20 flex flex-col items-center justify-between pt-10 pb-14 px-3 sm:py-8 sm:px-4"
           style={{
             background:
               "linear-gradient(to bottom, rgba(13,13,15,0.88) 0%, rgba(13,13,15,0.55) 30%, transparent 60%, transparent 85%, rgba(13,13,15,0.5) 100%)",
           }}
         >
           {/* Top */}
-          <div className="pointer-events-auto flex w-full max-w-2xl flex-col items-center gap-3 sm:gap-5">
+          <div className="pointer-events-auto flex w-full max-w-2xl flex-col items-center gap-2 sm:gap-5">
             <div className="text-center">
               <h1 className="text-2xl text-cream sm:text-3xl md:text-5xl">
                 Git{" "}
@@ -2266,7 +2575,7 @@ if (claimingGift) return;
                   ? `A city of ${stats.total_developers.toLocaleString()} GitHub developers. Find yourself.`
                   : "A global city of GitHub developers. Find yourself."}
               </p>
-              <p className="pointer-events-auto mt-1 text-[9px] text-cream/50 normal-case">
+              <p className="pointer-events-auto mt-1 text-[9px] text-cream/50 normal-case hidden sm:block">
                 built by{" "}
                 <a
                   href="https://x.com/samuelrizzondev"
@@ -2280,7 +2589,8 @@ if (claimingGift) return;
               </p>
             </div>
 
-            {/* Milestone progress banner */}
+            {/* Milestone progress banner — hidden on mobile to reduce clutter */}
+            <div className="hidden sm:flex sm:justify-center w-full">
             {MILESTONE_MODE === "stars" ? (
               // ── GitHub Stars mode ──
               (() => {
@@ -2377,7 +2687,7 @@ if (claimingGift) return;
                 );
               })()
             )}
-
+            </div>
 
             {/* Search / Welcome CTA takeover */}
             {welcomeCtaVisible && !session ? (
@@ -2454,7 +2764,7 @@ if (claimingGift) return;
 
           {/* Center - Explore buttons + Shop + Auth */}
           {buildings.length > 0 && (
-            <div className="pointer-events-auto flex flex-col items-center gap-3">
+            <div className="pointer-events-auto flex flex-col items-center gap-2 sm:gap-3">
               {/* Free Gift CTA — above primary actions */}
               {hasFreeGift && (
                 <button
@@ -2584,8 +2894,8 @@ if (claimingGift) return;
                 </div>
               )}
 
-              {/* Nav links */}
-              <div className="flex items-center justify-center gap-2">
+              {/* Nav + Auth — desktop only (mobile uses bottom bar) */}
+              <div className="hidden sm:flex items-center justify-center gap-2">
                 <Link
                   href={shopHref}
                   className="btn-press border-[3px] border-border bg-bg/80 px-4 py-1.5 text-[10px] backdrop-blur-sm transition-colors hover:border-border-light"
@@ -2614,9 +2924,7 @@ if (claimingGift) return;
                   &#9819; Leaderboard
                 </Link>
               </div>
-
-              {/* Auth */}
-              <div className="flex items-center justify-center gap-2">
+              <div className="hidden sm:flex items-center justify-center gap-2">
                 {!session ? (
                   <button
                     onClick={handleSignIn}
@@ -2653,6 +2961,13 @@ if (claimingGift) return;
                         </span>
                       )}
                     </Link>
+                    {myBuilding?.claimed && (
+                      <XpBar
+                        xpTotal={myBuilding.xp_total ?? 0}
+                        xpLevel={myBuilding.xp_level ?? 1}
+                        accent={theme.accent}
+                      />
+                    )}
                     <button
                       onClick={handleSignOut}
                       className="border-[2px] border-border bg-bg/80 px-2 py-1 text-[9px] text-muted backdrop-blur-sm transition-colors hover:text-cream hover:border-border-light"
@@ -2673,6 +2988,73 @@ if (claimingGift) return;
             )}
           </div>
         </div>
+      )}
+
+      {/* ─── Mobile Bottom Bar (game-style nav) ─── */}
+      {!flyMode && !exploreMode && !introMode && !rabbitCinematic && buildings.length > 0 && (
+        <nav className="pointer-events-auto fixed inset-x-0 bottom-0 z-[35] flex items-center justify-around border-t-[2px] border-border bg-bg/95 px-1 py-2 backdrop-blur-md sm:hidden">
+          <Link
+            href={shopHref}
+            className="btn-press border-[2px] border-border px-3 py-1.5 text-[10px] transition-colors active:bg-white/5"
+            style={{ color: theme.accent }}
+          >
+            Shop
+          </Link>
+          <Link
+            href="/advertise"
+            className="btn-press relative border-[2px] px-3 py-1.5 text-[10px] transition-colors active:bg-white/5"
+            style={{ color: theme.accent, borderColor: theme.accent + "60", backgroundColor: theme.accent + "12" }}
+          >
+            Ad
+            <span
+              className="absolute -top-1.5 -right-1.5 rounded-sm px-0.5 py-px text-[6px] font-bold leading-none text-bg"
+              style={{ backgroundColor: theme.accent }}
+            >
+              NEW
+            </span>
+          </Link>
+          <Link
+            href="/leaderboard"
+            className="btn-press border-[2px] border-border px-3 py-1.5 text-[10px] transition-colors active:bg-white/5"
+            style={{ color: theme.accent }}
+          >
+            &#9819; Rank
+          </Link>
+          {!session ? (
+            <button
+              onClick={handleSignIn}
+              className="btn-press border-[2px] border-border px-3 py-1.5 text-[10px] transition-colors active:bg-white/5"
+            >
+              <span style={{ color: theme.accent }}>G</span>{" "}
+              <span className="text-cream">Sign in</span>
+            </button>
+          ) : (
+            <>
+              {canClaim && (
+                <button
+                  onClick={handleClaim}
+                  disabled={claiming}
+                  className="btn-press px-3 py-1.5 text-[10px] text-bg disabled:opacity-40"
+                  style={{ backgroundColor: theme.accent, boxShadow: `2px 2px 0 0 ${theme.shadow}` }}
+                >
+                  {claiming ? "..." : "Claim"}
+                </button>
+              )}
+              <Link
+                href={`/dev/${authLogin}`}
+                className="btn-press flex items-center gap-1 border-[2px] border-border px-3 py-1.5 text-[10px] text-cream normal-case transition-colors active:bg-white/5"
+              >
+                @{authLogin.length > 8 ? authLogin.slice(0, 7) + "…" : authLogin}
+                {streakData && streakData.streak > 0 && (
+                  <span className="flex items-center gap-0.5" style={{ color: getStreakTierColor(streakData.streak) }}>
+                    <span className="text-[8px]">🔥</span>
+                    <span className="font-bold">{streakData.streak}</span>
+                  </span>
+                )}
+              </Link>
+            </>
+          )}
+        </nav>
       )}
 
       {/* ─── Purchase Toast ─── */}
@@ -2881,6 +3263,47 @@ if (claimingGift) return;
                   )}
                 </div>
               </div>
+
+              {/* XP Level badge + progress */}
+              {(() => {
+                const bTier = tierFromLevel(selectedBuilding.xp_level ?? 1);
+                const bRank = rankFromLevel(selectedBuilding.xp_level ?? 1);
+                const bProgress = levelProgress(selectedBuilding.xp_total ?? 0);
+                const bXpCurrent = (selectedBuilding.xp_total ?? 0) - xpForLevel(selectedBuilding.xp_level ?? 1);
+                const bXpNeeded = xpForLevel((selectedBuilding.xp_level ?? 1) + 1) - xpForLevel(selectedBuilding.xp_level ?? 1);
+                return (
+                  <div className="mx-4 mb-2 flex items-center gap-2">
+                    <span
+                      className="flex h-7 w-7 items-center justify-center border-[2px] text-xs font-bold"
+                      style={{ borderColor: bTier.color, color: bTier.color }}
+                    >
+                      {selectedBuilding.xp_level ?? 1}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] font-bold" style={{ color: bTier.color }}>
+                          Lv {selectedBuilding.xp_level ?? 1} · {bRank.title}
+                        </span>
+                        <span
+                          className="px-1 py-px text-[7px] font-bold"
+                          style={{ backgroundColor: bTier.color + "22", color: bTier.color }}
+                        >
+                          {bTier.name.toUpperCase()}
+                        </span>
+                      </div>
+                      <div className="mt-1 flex items-center gap-1.5">
+                        <div className="h-[4px] flex-1 bg-border">
+                          <div
+                            className="h-full"
+                            style={{ width: `${Math.max(2, Math.round(bProgress * 100))}%`, backgroundColor: bTier.color }}
+                          />
+                        </div>
+                        <span className="text-[7px] text-muted">{bXpCurrent}/{bXpNeeded}</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* District badge */}
               {selectedBuilding.district && (
@@ -3678,7 +4101,7 @@ if (claimingGift) return;
 
       {/* ─── Bottom-left controls: Theme + Radio (portal slot) + Intro ─── */}
       {!flyMode && !introMode && !rabbitCinematic && !exploreMode && (
-        <div className="pointer-events-auto fixed bottom-10 left-3 z-[25] flex items-center gap-2 sm:left-4">
+        <div className="pointer-events-auto fixed bottom-[82px] left-3 z-[25] flex items-center gap-2 sm:bottom-10 sm:left-4">
           <button
             onClick={cycleTheme}
             className="btn-press flex items-center gap-1.5 border-[3px] border-border bg-bg/70 px-2.5 py-1 text-[10px] backdrop-blur-sm transition-colors hover:border-border-light"
@@ -3701,7 +4124,7 @@ if (claimingGift) return;
 
 
       {/* ─── Daily Missions (quest tracker, right side) ─── */}
-      {session && myBuilding?.claimed && !flyMode && !introMode && !rabbitCinematic && (
+      {session && myBuilding?.claimed && !flyMode && !introMode && !exploreMode && !rabbitCinematic && (
         <DailiesWidget
           data={dailiesData}
           accent={theme.accent}
@@ -3738,10 +4161,16 @@ if (claimingGift) return;
         </div>
       )}
 
+      {/* ─── Level Up Toast ─── */}
+      {levelUpLevel !== null && (
+        <LevelUpToast level={levelUpLevel} onDone={() => setLevelUpLevel(null)} />
+      )}
+
       {/* ─── Activity Ticker ─── */}
       {!flyMode && !introMode && !rabbitCinematic && feedEvents.length >= 1 && (
         <ActivityTicker
           events={feedEvents}
+          hasBottomBar={!exploreMode && buildings.length > 0}
           onEventClick={(evt) => {
             if (compareBuilding || comparePair) return;
             const login = evt.actor?.login;

@@ -37,6 +37,10 @@ export interface DeveloperRecord {
   longest_streak?: number;
   active_days_last_year?: number;
   language_diversity?: number;
+  // XP fields
+  xp_total?: number;
+  xp_level?: number;
+  xp_github?: number;
 }
 
 export interface TopRepo {
@@ -70,6 +74,8 @@ export interface CityBuilding {
   current_week_kudos_received: number;
   active_raid_tag?: { attacker_login: string; tag_style: string; expires_at: string } | null;
   rabbit_completed: boolean;
+  xp_total: number;
+  xp_level: number;
   district?: string;
   district_chosen?: boolean;
   position: [number, number, number];
@@ -521,6 +527,8 @@ export function generateCityLayout(devs: DeveloperRecord[]): {
         current_week_kudos_received: (dev as unknown as Record<string, unknown>).current_week_kudos_received as number ?? 0,
         active_raid_tag: (dev as unknown as Record<string, unknown>).active_raid_tag as CityBuilding["active_raid_tag"] ?? null,
         rabbit_completed: (dev as unknown as Record<string, unknown>).rabbit_completed as boolean ?? false,
+        xp_total: (dev as unknown as Record<string, unknown>).xp_total as number ?? 0,
+        xp_level: (dev as unknown as Record<string, unknown>).xp_level as number ?? 1,
         district: did,
         district_chosen: (dev as unknown as Record<string, unknown>).district_chosen as boolean ?? false,
         position: [posX, 0, posZ],

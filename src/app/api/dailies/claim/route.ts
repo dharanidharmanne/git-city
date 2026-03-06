@@ -82,6 +82,9 @@ export async function POST() {
     return NextResponse.json({ error: "Already claimed today" }, { status: 400 });
   }
 
+  // Grant XP for completing all dailies
+  admin.rpc("grant_xp", { p_developer_id: dev.id, p_source: "dailies", p_amount: 25 }).then();
+
   // Grant streak freeze every 7 completions (cap at 2)
   let freezeGranted = false;
   if (claimResult.total % 7 === 0) {

@@ -263,7 +263,7 @@ export async function POST(request: Request) {
         expires_at: new Date(Date.now() + RAID_TAG_DURATION_DAYS * 86400000).toISOString(),
       });
 
-      // Grant XP
+      // Grant raid_xp (existing system) + general XP
       await Promise.all([
         admin
           .from("developers")
@@ -274,12 +274,18 @@ export async function POST(request: Request) {
           .update({ raid_xp: (defender.raid_xp ?? 0) + XP_WIN_DEFENDER })
           .eq("id", defender.id),
       ]);
+      // General XP: attacker wins 50, defender gets 30 for being raided
+      admin.rpc("grant_xp", { p_developer_id: attacker.id, p_source: "raid_win", p_amount: 50 }).then();
+      admin.rpc("grant_xp", { p_developer_id: defender.id, p_source: "raid_defend", p_amount: 30 }).then();
     } else {
       // Defender gets XP for successful defense
       await admin
         .from("developers")
         .update({ raid_xp: (defender.raid_xp ?? 0) + XP_LOSE_DEFENDER })
         .eq("id", defender.id);
+      // General XP: attacker loses 15, defender defends 30
+      admin.rpc("grant_xp", { p_developer_id: attacker.id, p_source: "raid_loss", p_amount: 15 }).then();
+      admin.rpc("grant_xp", { p_developer_id: defender.id, p_source: "raid_defend", p_amount: 30 }).then();
     }
 
     // Activity feed

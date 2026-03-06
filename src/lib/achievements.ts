@@ -1,5 +1,6 @@
 import { getSupabaseAdmin } from "./supabase";
 import { sendAchievementNotification } from "./notification-senders/achievement";
+import { xpForAchievementTier } from "./xp";
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -157,6 +158,18 @@ export async function checkAchievements(
     await sb
       .from("purchases")
       .upsert(purchaseRows, { onConflict: "developer_id,item_id" });
+  }
+
+  // Grant XP for each achievement unlock
+  for (const a of newUnlocks) {
+    const xpAmount = xpForAchievementTier(a.tier);
+    if (xpAmount > 0) {
+      sb.rpc("grant_xp", {
+        p_developer_id: developerId,
+        p_source: "achievement",
+        p_amount: xpAmount,
+      }).then();
+    }
   }
 
   // Insert feed events

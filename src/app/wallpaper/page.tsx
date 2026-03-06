@@ -38,28 +38,45 @@ function WallpaperInner() {
   const [ready, setReady] = useState(false);
 
   const fetchCity = useCallback(async () => {
-    const CHUNK = 1000;
-    const res = await fetch(`/api/city?from=0&to=${CHUNK}`);
-    if (!res.ok) return;
-    const data = await res.json();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let allDevs: any[] = [];
 
-    let allDevs = data.developers;
-
-    // Fetch remaining chunks if needed
-    const total = data.stats?.total_developers ?? allDevs.length;
-    if (total > CHUNK) {
-      const promises: Promise<{ developers: typeof allDevs } | null>[] = [];
-      for (let from = CHUNK; from < total; from += CHUNK) {
-        promises.push(
-          fetch(`/api/city?from=${from}&to=${from + CHUNK}`)
-            .then((r) => (r.ok ? r.json() : null))
-        );
+    // Try pre-computed snapshot first
+    try {
+      const v = Math.floor(Date.now() / 300_000);
+      const snapshotUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/city-data/snapshot.json?v=${v}`;
+      const snapshotRes = await fetch(snapshotUrl);
+      if (snapshotRes.ok) {
+        const snapshot = await snapshotRes.json();
+        allDevs = snapshot.developers;
       }
-      const chunks = await Promise.all(promises);
-      for (const chunk of chunks) {
-        if (chunk) allDevs = [...allDevs, ...chunk.developers];
+    } catch { /* fall through to chunked */ }
+
+    // Fallback to chunked API
+    if (allDevs.length === 0) {
+      const CHUNK = 1000;
+      const res = await fetch(`/api/city?from=0&to=${CHUNK}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      allDevs = data.developers ?? [];
+
+      const total = data.stats?.total_developers ?? allDevs.length;
+      if (total > CHUNK) {
+        const promises: Promise<{ developers: typeof allDevs } | null>[] = [];
+        for (let from = CHUNK; from < total; from += CHUNK) {
+          promises.push(
+            fetch(`/api/city?from=${from}&to=${from + CHUNK}`)
+              .then((r) => (r.ok ? r.json() : null))
+          );
+        }
+        const chunks = await Promise.all(promises);
+        for (const chunk of chunks) {
+          if (chunk) allDevs = [...allDevs, ...chunk.developers];
+        }
       }
     }
+
+    if (allDevs.length === 0) return;
 
     const layout = generateCityLayout(allDevs);
     setBuildings(layout.buildings);

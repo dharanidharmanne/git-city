@@ -208,6 +208,13 @@ export async function POST() {
 
   let newAchievements: string[] = [];
   let streakReward: { milestone: number; item_id: string; item_name: string } | null = null;
+  let xpResult: { granted: number; new_total: number; new_level: number } | null = null;
+
+  // Grant XP for check-in
+  if (checkinResult.checked_in) {
+    const { data: xpData } = await sb.rpc("grant_xp", { p_developer_id: dev.id, p_source: "checkin", p_amount: 10 });
+    if (xpData) xpResult = xpData as { granted: number; new_total: number; new_level: number };
+  }
 
   if (checkinResult.checked_in) {
     // Check achievements with updated streak
@@ -323,5 +330,6 @@ export async function POST() {
     kudos_since_last: recentKudos?.length ?? 0,
     raids_since_last: raidsSinceLast,
     streak_reward: streakReward,
+    xp: xpResult,
   });
 }

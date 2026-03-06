@@ -9,6 +9,7 @@ import { getOwnedItems } from "@/lib/items";
 import { TIER_COLORS } from "@/lib/achievements";
 import { DISTRICT_NAMES, DISTRICT_COLORS } from "@/lib/github";
 import { ITEM_NAMES } from "@/lib/zones";
+import { rankFromLevel, tierFromLevel, levelProgress, xpForLevel } from "@/lib/xp";
 import ClaimButton from "@/components/ClaimButton";
 import ShareButtons from "@/components/ShareButtons";
 import CompareChallenge from "@/components/CompareChallenge";
@@ -216,6 +217,59 @@ export default async function DevPage({ params }: Props) {
             </p>
           )}
         </div>
+
+        {/* XP & Level */}
+        {(() => {
+          const xpLevel = dev.xp_level ?? 1;
+          const xpTotal = dev.xp_total ?? 0;
+          const tier = tierFromLevel(xpLevel);
+          const rank = rankFromLevel(xpLevel);
+          const progress = levelProgress(xpTotal);
+          const xpCurrent = xpTotal - xpForLevel(xpLevel);
+          const xpNeeded = xpForLevel(xpLevel + 1) - xpForLevel(xpLevel);
+          return (
+            <div className="mt-5 border-[3px] border-border bg-bg-raised p-4">
+              <div className="flex items-center gap-3">
+                <span
+                  className="flex h-10 w-10 items-center justify-center border-[2px] text-lg font-bold"
+                  style={{ borderColor: tier.color, color: tier.color }}
+                >
+                  {xpLevel}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-bold" style={{ color: tier.color }}>
+                      {rank.title}
+                    </span>
+                    <span
+                      className="px-1.5 py-0.5 text-[8px] font-bold"
+                      style={{ backgroundColor: tier.color + "22", color: tier.color }}
+                    >
+                      {tier.name.toUpperCase()}
+                    </span>
+                  </div>
+                  <div className="mt-1.5 flex items-center gap-2">
+                    <div className="h-[5px] flex-1 bg-border">
+                      <div
+                        className="h-full"
+                        style={{
+                          width: `${Math.max(2, Math.round(progress * 100))}%`,
+                          backgroundColor: tier.color,
+                        }}
+                      />
+                    </div>
+                    <span className="text-[9px] text-muted whitespace-nowrap">
+                      {xpCurrent.toLocaleString()} / {xpNeeded.toLocaleString()} XP
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <div className="mt-2 text-right text-[9px] text-muted">
+                {xpTotal.toLocaleString()} XP total
+              </div>
+            </div>
+          );
+        })()}
 
         {/* View in City (prominent) */}
         <div className="mt-5">

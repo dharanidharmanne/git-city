@@ -1705,3 +1705,124 @@ export const GitHubStar = memo(function GitHubStar({
     </group>
   );
 });
+
+// ─── Tier Glow (XP Level Visual Effects) ─────────────────────
+// Applied based on developer XP tier to show progression
+
+/** Staging tier (Lv 5-8): Subtle blue neon trim on edges */
+export const TierNeonTrim = memo(function TierNeonTrim({
+  width,
+  height,
+  depth,
+  color,
+}: {
+  width: number;
+  height: number;
+  depth: number;
+  color: string;
+}) {
+  const groupRef = useRef<THREE.Group>(null);
+  const frameCount = useRef(0);
+
+  useFrame((state) => {
+    if (!groupRef.current) return;
+    frameCount.current++;
+    if (frameCount.current % 3 !== 0) return;
+    const pulse = 0.5 + Math.sin(state.clock.elapsedTime * 1.5) * 0.3;
+    groupRef.current.children.forEach((m) => {
+      const mat = (m as THREE.Mesh).material as THREE.MeshBasicMaterial;
+      if (mat.opacity !== undefined) mat.opacity = pulse;
+    });
+  });
+
+  const t = 0.6;
+  const hw = width / 2 + t;
+  const hd = depth / 2 + t;
+
+  return (
+    <group ref={groupRef}>
+      {/* 4 vertical corner lines */}
+      {([[-hw, hd], [hw, hd], [-hw, -hd], [hw, -hd]] as [number, number][]).map(([x, z], i) => (
+        <mesh key={i} position={[x, height / 2, z]} geometry={_box} scale={[t, height, t]}>
+          <meshBasicMaterial color={color} transparent opacity={0.6} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
+        </mesh>
+      ))}
+      {/* Top horizontal ring */}
+      <mesh position={[0, height, hd]} geometry={_box} scale={[width + t * 2, t, t]}>
+        <meshBasicMaterial color={color} transparent opacity={0.6} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
+      </mesh>
+      <mesh position={[0, height, -hd]} geometry={_box} scale={[width + t * 2, t, t]}>
+        <meshBasicMaterial color={color} transparent opacity={0.6} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
+      </mesh>
+      <mesh position={[hw, height, 0]} geometry={_box} scale={[t, t, depth]}>
+        <meshBasicMaterial color={color} transparent opacity={0.6} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
+      </mesh>
+      <mesh position={[-hw, height, 0]} geometry={_box} scale={[t, t, depth]}>
+        <meshBasicMaterial color={color} transparent opacity={0.6} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
+      </mesh>
+    </group>
+  );
+});
+
+/** Production tier (Lv 9-13): Pulsating glow at building base */
+export const TierBaseGlow = memo(function TierBaseGlow({
+  width,
+  depth,
+  color,
+}: {
+  width: number;
+  depth: number;
+  color: string;
+}) {
+  const meshRef = useRef<THREE.Mesh>(null);
+  const frameCount = useRef(0);
+
+  useFrame((state) => {
+    if (!meshRef.current) return;
+    frameCount.current++;
+    if (frameCount.current % 3 !== 0) return;
+    const mat = meshRef.current.material as THREE.MeshBasicMaterial;
+    mat.opacity = 0.15 + Math.sin(state.clock.elapsedTime * 2) * 0.1;
+  });
+
+  return (
+    <mesh ref={meshRef} position={[0, 0.2, 0]} rotation={[-Math.PI / 2, 0, 0]} geometry={_plane} scale={[width + 12, depth + 12, 1]}>
+      <meshBasicMaterial color={color} transparent opacity={0.2} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
+    </mesh>
+  );
+});
+
+/** Sky beam effect for high tiers (Unicorn/Founder) */
+export const TierSkyBeam = memo(function TierSkyBeam({
+  height,
+  color,
+  prismatic = false,
+}: {
+  height: number;
+  color: string;
+  prismatic?: boolean;
+}) {
+  const meshRef = useRef<THREE.Mesh>(null);
+  const frameCount = useRef(0);
+
+  useFrame((state) => {
+    if (!meshRef.current) return;
+    frameCount.current++;
+    if (frameCount.current % 2 !== 0) return;
+    const t = state.clock.elapsedTime;
+    const mat = meshRef.current.material as THREE.MeshBasicMaterial;
+    mat.opacity = 0.04 + Math.sin(t * 0.8) * 0.02;
+    if (prismatic) {
+      const hue = (t * 0.05) % 1;
+      mat.color.setHSL(hue, 0.8, 0.7);
+    }
+  });
+
+  const beamH = 400;
+
+  return (
+    <mesh ref={meshRef} position={[0, height + beamH / 2, 0]} geometry={_box} scale={[3, beamH, 3]}>
+      <meshBasicMaterial color={color} transparent opacity={0.05} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
+    </mesh>
+  );
+});

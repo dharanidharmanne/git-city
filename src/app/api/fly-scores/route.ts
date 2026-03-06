@@ -110,6 +110,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Failed to save" }, { status: 500 });
   }
 
+  // Grant XP for fly score (score * 0.1)
+  const flyXp = Math.floor(score * 0.1);
+  if (flyXp > 0) {
+    admin.rpc("grant_xp", { p_developer_id: dev.id, p_source: "fly", p_amount: flyXp }).then();
+  }
+
   // Track daily missions for fly scores
   trackDailyMission(dev.id, "fly_score_50", { score });
   trackDailyMission(dev.id, "fly_score_150", { score });
