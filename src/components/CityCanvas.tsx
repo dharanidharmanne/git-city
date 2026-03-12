@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useEffect, useState, useMemo } from "react";
+import { useRef, useEffect, useEffectEvent, useState, useMemo } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, useGLTF, Stats, PerformanceMonitor } from "@react-three/drei";
 import { EffectComposer, Bloom } from "@react-three/postprocessing";
@@ -19,7 +19,9 @@ import type { RaidExecuteResponse } from "@/lib/raid";
 import FounderSpire from "./FounderSpire";
 import WhiteRabbit from "./WhiteRabbit";
 import CelebrationEffect from "./CelebrationEffect";
+import ComparePath from "./ComparePath";
 import WallpaperParallax from "./WallpaperParallax";
+import ThemeSkyFX from "./ThemeSkyFX";
 
 // ─── Theme Definitions ───────────────────────────────────────
 
@@ -225,18 +227,18 @@ const TARGET_Y = 450;
 const INTRO_WAYPOINTS: [number, number, number][] = [
   [-1600, 800, 1800],   // WP0: Far, high, left - city hidden in fog
   [-1000, 700, 1300],   // WP1: Descending, silhouette appears
-  [-600,  600, 900],    // WP2: Ad plane level, buildings becoming clear
-  [-200,  550, 650],    // WP3: Skirting the city edge
-  [200,   600, 600],    // WP4: Crossing over
-  [500,   700, 700],    // WP5: Rising, pulling back
-  [700,   800, 900],    // WP6: Dramatic pullback
-  [800,   850, 1000],   // WP7: Final orbit position (wide panorama)
+  [-600, 600, 900],    // WP2: Ad plane level, buildings becoming clear
+  [-200, 550, 650],    // WP3: Skirting the city edge
+  [200, 600, 600],    // WP4: Crossing over
+  [500, 700, 700],    // WP5: Rising, pulling back
+  [700, 800, 900],    // WP6: Dramatic pullback
+  [800, 850, 1000],   // WP7: Final orbit position (wide panorama)
 ];
 
 // Look targets smoothly converge toward the founder building top
 const INTRO_LOOK_TARGETS: [number, number, number][] = [
-  [100,      300,      -200],      // WP0: Toward distant city, already high
-  [TARGET_X, 380,      TARGET_Z],  // WP1: Rising toward founder top
+  [100, 300, -200],      // WP0: Toward distant city, already high
+  [TARGET_X, 380, TARGET_Z],  // WP1: Rising toward founder top
   [TARGET_X, TARGET_Y, TARGET_Z],  // WP2: Locking on
   [TARGET_X, TARGET_Y, TARGET_Z],  // WP3: Holding
   [TARGET_X, TARGET_Y, TARGET_Z],  // WP4: Holding
@@ -496,7 +498,7 @@ function CameraFocus({
     if (controlsRef.current) {
       controlsRef.current.autoRotate = false;
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusedBuilding, focusedBuildingB, camera, controlsRef]);
 
   useFrame((_, delta) => {
@@ -553,7 +555,7 @@ const _idealLook = new THREE.Vector3();
 const _blendedPos = new THREE.Vector3();
 const _yAxis = new THREE.Vector3(0, 1, 0);
 
-function AirplaneFlight({ onExit, onHud, onPause, pauseSignal = 0, hasOverlay = false, startPaused = false, vehicleType = "airplane", posRef }: { onExit: () => void; onHud: (s: number, a: number, x: number, z: number, yaw: number) => void; onPause: (paused: boolean) => void; pauseSignal?: number; hasOverlay?: boolean; startPaused?: boolean; vehicleType?: string; posRef?: React.MutableRefObject<THREE.Vector3> }) {
+function AirplaneFlight({ onExit, onHud, onPause, pauseSignal = 0, hasOverlay = false, startPaused = false, vehicleType = "airplane", posRef, cityRadius = 3500 }: { onExit: () => void; onHud: (s: number, a: number, x: number, z: number, yaw: number) => void; onPause: (paused: boolean) => void; pauseSignal?: number; hasOverlay?: boolean; startPaused?: boolean; vehicleType?: string; posRef?: React.MutableRefObject<THREE.Vector3>; cityRadius?: number }) {
   const { camera } = useThree();
   const ref = useRef<THREE.Group>(null);
   const orbitRef = useRef<any>(null);
@@ -582,6 +584,13 @@ function AirplaneFlight({ onExit, onHud, onPause, pauseSignal = 0, hasOverlay = 
   const transitionLookFrom = useRef(new THREE.Vector3());
   const transitionLookTo = useRef(new THREE.Vector3());
   const wasJustUnpaused = useRef(false);
+
+  // Contrail / speed trail
+  const TRAIL_POINTS = 48;
+  const trailPositions = useRef(new Float32Array(TRAIL_POINTS * 3));
+  const trailColors = useRef(new Float32Array(TRAIL_POINTS * 4));
+  const trailGeomRef = useRef<THREE.BufferGeometry>(null);
+  const trailInit = useRef(false);
 
   const hudTimer = useRef(0);
   const lastHudSpeed = useRef(-1);
@@ -650,6 +659,30 @@ function AirplaneFlight({ onExit, onHud, onPause, pauseSignal = 0, hasOverlay = 
     }
   }, [pauseSignal, onPause]);
 
+  // Auto-pause when an overlay opens, auto-resume when it closes.
+  // useEffectEvent gives a stable identity that always reads the latest onPause
+  // without adding it to the effect's dependency array.
+  const notifyPause = useEffectEvent((p: boolean) => onPause(p));
+  useEffect(() => {
+    if (hasOverlay) {
+      if (!paused.current) {
+        paused.current = true;
+        setIsPaused(true);
+        notifyPause(true);
+      }
+    } else {
+      if (paused.current) {
+        paused.current = false;
+        setIsPaused(false);
+        wasJustUnpaused.current = true;
+        transitionProgress.current = 0;
+        transitionFrom.current.copy(camera.position);
+        transitionLookFrom.current.copy(camLook.current);
+        notifyPause(false);
+      }
+    }
+  }, [hasOverlay]);
+
   // Keyboard
   const hasOverlayRef = useRef(hasOverlay);
   hasOverlayRef.current = hasOverlay;
@@ -699,6 +732,11 @@ function AirplaneFlight({ onExit, onHud, onPause, pauseSignal = 0, hasOverlay = 
         e.preventDefault();
         if (paused.current) doResume();
         else doPause();
+      } else if (e.code === "KeyR") {
+        if (!paused.current) {
+          // Return to City
+          yaw.current = Math.atan2(pos.current.x, pos.current.z);
+        }
       } else if (paused.current && FLIGHT_KEYS.has(e.code)) {
         // Any flight key while paused → resume flying
         doResume();
@@ -778,6 +816,28 @@ function AirplaneFlight({ onExit, onHud, onPause, pauseSignal = 0, hasOverlay = 
     _fwd.set(-Math.sin(yaw.current), 0, -Math.cos(yaw.current));
     pos.current.addScaledVector(_fwd, actualSpeed * dt);
 
+    // Soft / Hard boundary for X/Z dynamically based on city size
+    const MAX_RADIUS = Math.max(3500, cityRadius * 1.3);
+    const SOFT_RADIUS = MAX_RADIUS * 0.85;
+    const distSq = pos.current.x * pos.current.x + pos.current.z * pos.current.z;
+    if (distSq > SOFT_RADIUS * SOFT_RADIUS) {
+      const dist = Math.sqrt(distSq);
+      if (dist > SOFT_RADIUS) {
+        const excess = dist - SOFT_RADIUS;
+        const pullFactor = Math.min(excess / (MAX_RADIUS - SOFT_RADIUS), 1.0);
+        const pullMag = actualSpeed * dt * pullFactor * 1.5;
+        pos.current.x -= (pos.current.x / dist) * pullMag;
+        pos.current.z -= (pos.current.z / dist) * pullMag;
+
+        const newDistSq = pos.current.x * pos.current.x + pos.current.z * pos.current.z;
+        if (newDistSq > MAX_RADIUS * MAX_RADIUS) {
+          const newDist = Math.sqrt(newDistSq);
+          pos.current.x = (pos.current.x / newDist) * MAX_RADIUS;
+          pos.current.z = (pos.current.z / newDist) * MAX_RADIUS;
+        }
+      }
+    }
+
     if (posRef) posRef.current.copy(pos.current);
 
     const targetBank = -turnInput * MAX_BANK;
@@ -815,6 +875,38 @@ function AirplaneFlight({ onExit, onHud, onPause, pauseSignal = 0, hasOverlay = 
     }
     camera.lookAt(camLook.current);
 
+    // Update trail
+    if (!trailInit.current) {
+      for (let i = 0; i < TRAIL_POINTS; i++) {
+        trailPositions.current[i * 3] = pos.current.x;
+        trailPositions.current[i * 3 + 1] = pos.current.y;
+        trailPositions.current[i * 3 + 2] = pos.current.z;
+        trailColors.current[i * 4] = 1;
+        trailColors.current[i * 4 + 1] = 1;
+        trailColors.current[i * 4 + 2] = 1;
+        trailColors.current[i * 4 + 3] = 0;
+      }
+      trailInit.current = true;
+    } else {
+      trailPositions.current.copyWithin(3, 0, (TRAIL_POINTS - 1) * 3);
+      trailPositions.current[0] = pos.current.x - _fwd.x * 5; // trails slightly behind the nose
+      trailPositions.current[1] = pos.current.y;
+      trailPositions.current[2] = pos.current.z - _fwd.z * 5;
+    }
+
+    const speedRatio = actualSpeed / DEFAULT_FLY_SPEED;
+    for (let i = 0; i < TRAIL_POINTS; i++) {
+      const fade = 1 - (i / TRAIL_POINTS);
+      // Only show trail when boosting (speedRatio > 1) or fast
+      const intensity = Math.max(0, Math.min(1.0, (speedRatio - 0.7) * 1.5));
+      trailColors.current[i * 4 + 3] = fade * intensity * 0.5; // max 50% opacity
+    }
+
+    if (trailGeomRef.current) {
+      trailGeomRef.current.attributes.position.needsUpdate = true;
+      trailGeomRef.current.attributes.color.needsUpdate = true;
+    }
+
     hudTimer.current += dt;
     if (hudTimer.current > 0.25) {
       hudTimer.current = 0;
@@ -826,6 +918,13 @@ function AirplaneFlight({ onExit, onHud, onPause, pauseSignal = 0, hasOverlay = 
 
   return (
     <>
+      <line>
+        <bufferGeometry ref={trailGeomRef}>
+          <bufferAttribute attach="attributes-position" args={[trailPositions.current, 3]} count={TRAIL_POINTS} />
+          <bufferAttribute attach="attributes-color" args={[trailColors.current, 4]} count={TRAIL_POINTS} />
+        </bufferGeometry>
+        <lineBasicMaterial transparent vertexColors depthWrite={false} blending={THREE.AdditiveBlending} linewidth={2} />
+      </line>
       <group ref={ref}>
         <group scale={[4, 4, 4]}>
           <VehicleMesh type={vehicleType} />
@@ -1957,14 +2056,15 @@ export default function CityCanvas({ buildings, plazas, decorations, river, brid
       <hemisphereLight args={[t.hemiSky, t.hemiGround, t.hemiIntensity * 3.5]} key={`hemi-${themeIndex}`} />
 
       <SkyDome key={`sky-${themeIndex}`} stops={t.sky} />
+      <ThemeSkyFX key={`sky-fx-${themeIndex}`} themeIndex={themeIndex as 0 | 1 | 2 | 3} theme={t} />
 
-      {introMode && <IntroFlyover onEnd={onIntroEnd ?? (() => {})} />}
+      {introMode && <IntroFlyover onEnd={onIntroEnd ?? (() => { })} />}
 
       {rabbitCinematic && rabbitCinematicTarget != null && (
         <RabbitFlyover
           targetPlazaIndex={RABBIT_PLAZA_INDICES[(rabbitCinematicTarget - 1)] ?? 1}
           plazas={plazas}
-          onEnd={onRabbitCinematicEnd ?? (() => {})}
+          onEnd={onRabbitCinematicEnd ?? (() => { })}
         />
       )}
 
@@ -1982,14 +2082,14 @@ export default function CityCanvas({ buildings, plazas, decorations, river, brid
               attacker={raidAttacker ?? null}
               defender={raidDefender ?? null}
               raidData={raidData ?? null}
-              onPhaseComplete={onRaidPhaseComplete ?? (() => {})}
+              onPhaseComplete={onRaidPhaseComplete ?? (() => { })}
             />
           )}
 
           {!introMode && flyMode && (
             <>
-              <AirplaneFlight onExit={onExitFly} onHud={onHud ?? (() => {})} onPause={onPause ?? (() => {})} pauseSignal={flyPauseSignal} hasOverlay={flyHasOverlay} startPaused={flyStartPaused} vehicleType={flyVehicle} posRef={flyPosRef} />
-              <SkyCollectibles playerPosRef={flyPosRef} accentColor={accentColor ?? "#6090e0"} onCollect={onCollect ?? (() => {})} cityRadius={cityRadius} />
+              <AirplaneFlight onExit={onExitFly} onHud={onHud ?? (() => { })} onPause={onPause ?? (() => { })} pauseSignal={flyPauseSignal} hasOverlay={flyHasOverlay} startPaused={flyStartPaused} vehicleType={flyVehicle} posRef={flyPosRef} cityRadius={cityRadius} />
+              <SkyCollectibles playerPosRef={flyPosRef} accentColor={accentColor ?? "#6090e0"} onCollect={onCollect ?? (() => { })} cityRadius={cityRadius} />
             </>
           )}
         </>
@@ -1997,7 +2097,7 @@ export default function CityCanvas({ buildings, plazas, decorations, river, brid
 
       <Ground key={`ground-${themeIndex}`} color={t.groundColor} grid1={t.grid1} grid2={t.grid2} />
 
-      <FounderSpire onClick={onLandmarkClick ?? (() => {})} />
+      <FounderSpire onClick={onLandmarkClick ?? (() => { })} />
 
       {!wallpaperMode && celebrationActive && <CelebrationEffect cityRadius={cityRadius} />}
 
@@ -2010,7 +2110,7 @@ export default function CityCanvas({ buildings, plazas, decorations, river, brid
           <WhiteRabbit
             position={pos}
             visible={true}
-            onCaught={onRabbitCaught ?? (() => {})}
+            onCaught={onRabbitCaught ?? (() => { })}
           />
         );
       })()}
@@ -2042,6 +2142,13 @@ export default function CityCanvas({ buildings, plazas, decorations, river, brid
         holdRise={holdRise}
         liveByLogin={liveByLogin}
         cityEnergy={cityEnergy}
+      />
+
+      <ComparePath
+        buildings={buildings}
+        focusedBuilding={raidPhase && raidPhase !== "idle" && raidPhase !== "preview" && raidPhase !== "share" && raidPhase !== "done" ? (raidDefender?.login ?? focusedBuilding ?? null) : (focusedBuilding ?? null)}
+        focusedBuildingB={raidPhase && raidPhase !== "idle" && raidPhase !== "preview" && raidPhase !== "share" && raidPhase !== "done" ? (raidAttacker?.login ?? null) : (focusedBuildingB ?? null)}
+        accentColor={t.building.accent}
       />
 
       <InstancedDecorations items={decorations} roadMarkingColor={t.roadMarkingColor} sidewalkColor={t.sidewalkColor} />
